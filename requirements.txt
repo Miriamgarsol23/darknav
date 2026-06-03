@@ -1,0 +1,39 @@
+# DarkNav
+# Python 3.10 or above
+# All packages installable via pip on CPU-only hardware
+
+# Core scientific computing
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
+pandas>=2.0
+
+# Astronomy and geospatial data I/O
+astropy>=5.3
+rasterio>=1.3
+pillow>=10.0
+
+# Deep learning
+torch>=2.0
+torchvision>=0.15
+
+# Pretrained model zoo and ONNX export
+timm>=0.9
+onnx>=1.14
+onnxruntime>=1.16
+
+# Explainability
+grad-cam>=1.4
+
+# Image processing and metrics
+scikit-image>=0.21
+scikit-learn>=1.3
+albumentations>=1.3
+
+# Dark matter halo profiles
+halotools>=0.8
+
+# Notebook and progress utilities
+jupyter>=1.0
+ipywidgets>=8.0
+tqdm>=4.65
