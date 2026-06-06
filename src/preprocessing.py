@@ -1,17 +1,20 @@
 """
-preprocessing.py  (corrected for real DeepMoon HDF5 structure)
-==============================================================
+preprocessing.py
+================
+Pipeline for loading, filtering, and saving real LRO DEM patches
+from the DeepMoon dataset (Silburt et al. 2019, Zenodo 1133969).
+
 Author: Miriam Garcia Sollo
 Date:   June 2026
 
-Real DeepMoon HDF5 structure (verified from file):
-    f['input_images']   -> Group with keys '0', '1', ..., 'N-1'
-                           each value is a 2D array (H, W) float
-    f['target_masks']   -> Group with keys '0', '1', ..., 'N-1'
-                           each value is a 2D binary array (H, W)
-    f['cll_xy']         -> crater positions (not used, we use target_masks)
-    f['longlat_bounds'] -> geographic bounds per patch
-    f['pix_bounds']     -> pixel bounds
+Real HDF5 structure (verified):
+    f['input_images']  -> Dataset (30000, 256, 256) uint8
+    f['target_masks']  -> Dataset (30000, 256, 256) float32
+    f['cll_xy']        -> Group with subkeys img_00000, img_00001, ...
+    f['longlat_bounds'], f['pix_bounds'], f['pix_distortion_coefficient'] -> Groups
+
+Usage:
+    python src/preprocessing.py --data_dir data --out_dir data/processed
 """
 
 import numpy as np
@@ -19,7 +22,7 @@ import h5py
 import argparse
 from pathlib import Path
 from scipy.ndimage import zoom
-from typing import Tuple, Optional
+from typing import Tuple
 
 
 PATCH_SIZE   = 128
@@ -28,82 +31,65 @@ MAX_COVERAGE = 0.60
 
 
 # ─────────────────────────────────────────────
-# HDF5 loading  (CORRECTED)
+# HDF5 loading
 # ─────────────────────────────────────────────
 
 def load_hdf5_split(
     path: Path,
     target_size: int = PATCH_SIZE,
+    max_samples: int = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Load DEM patches and masks from a DeepMoon HDF5 file.
 
-    The DeepMoon HDF5 format stores images and masks as Groups
-    with integer-string subkeys ('0', '1', ..., 'N-1').
+    input_images and target_masks are both plain 3D Datasets:
+        input_images : (N, 256, 256) uint8
+        target_masks : (N, 256, 256) float32, values in [0, 1]
 
     Parameters
     ----------
-    path : Path to .hdf5 file
-    target_size : output patch size in pixels (downsampled from original)
+    path        : Path to .hdf5 file
+    target_size : output patch size (downsampled from 256)
+    max_samples : if set, only load the first max_samples patches (for testing)
 
     Returns
     -------
-    images : np.ndarray, shape (N, target_size, target_size), float32
-             Normalised to [-1, 1] per patch.
-    masks  : np.ndarray, shape (N, target_size, target_size), uint8
-             Binary: 1 = crater pixel, 0 = background.
+    images : (N, target_size, target_size) float32, normalised to [-1, 1]
+    masks  : (N, target_size, target_size) uint8, binary 0/1
     """
     with h5py.File(path, 'r') as f:
+        raw_images = f['input_images']  # Dataset (N, 256, 256) uint8
+        raw_masks  = f['target_masks']  # Dataset (N, 256, 256) float32
 
-        # Discover structure: subkeys are '0', '1', ... as strings
-        img_group  = f['input_images']
-        mask_group = f['target_masks']
+        n_total = raw_images.shape[0]
+        n = n_total if max_samples is None else min(max_samples, n_total)
 
-        # Sort keys numerically
-        keys = sorted(img_group.keys(), key=lambda k: int(k))
-        n = len(keys)
-        print(f'  Found {n} patches in {path.name}')
+        orig_size = raw_images.shape[1]
+        print(f'  {path.name}: {n_total} patches at {orig_size}x{orig_size}')
+        print(f'  Loading {n} patches...', end=' ')
 
-        # Load first patch to get original size
-        first_img = img_group[keys[0]][:]
-        orig_size = first_img.shape[-1]  # works for (H,W) or (1,H,W) or (H,W,1)
+        imgs  = raw_images[:n].astype(np.float32)   # load into RAM
+        masks = raw_masks[:n]                         # float32 in [0,1]
 
-        print(f'  Original patch shape: {img_group[keys[0]].shape}')
-        factor = target_size / orig_size if orig_size != target_size else 1.0
+    print('done')
 
-        images = np.zeros((n, target_size, target_size), dtype=np.float32)
-        masks  = np.zeros((n, target_size, target_size), dtype=np.uint8)
-
-        for i, k in enumerate(keys):
-            if i % 1000 == 0:
-                print(f'  Loading {i}/{n}...', end='\r')
-
-            # Load image
-            img = img_group[k][:]
-            img = np.squeeze(img)            # remove any singleton dims -> (H, W)
-            if img.ndim != 2:
-                raise ValueError(f'Unexpected image shape after squeeze: {img.shape}')
-
-            # Load mask
-            msk = mask_group[k][:]
-            msk = np.squeeze(msk)
-
-            # Downsample if needed
-            if factor != 1.0:
-                img = zoom(img, factor, order=1)
-                msk = zoom(msk, factor, order=0)  # nearest for binary mask
-
-            images[i] = img.astype(np.float32)
-            masks[i]  = (msk > 0).astype(np.uint8)
-
-        print(f'  Loaded {n}/{n} patches')
+    # Downsample to target_size
+    if orig_size != target_size:
+        factor = target_size / orig_size
+        print(f'  Downsampling {orig_size} -> {target_size} (factor={factor:.3f})...', end=' ')
+        imgs  = np.stack([zoom(imgs[i],  factor, order=1) for i in range(n)])
+        masks = np.stack([zoom(masks[i], factor, order=0) for i in range(n)])
+        print('done')
 
     # Normalise images to [-1, 1] per patch
-    pmin = images.min(axis=(1, 2), keepdims=True)
-    pmax = images.max(axis=(1, 2), keepdims=True)
+    pmin  = imgs.min(axis=(1, 2), keepdims=True)
+    pmax  = imgs.max(axis=(1, 2), keepdims=True)
     denom = np.where(pmax - pmin > 0, pmax - pmin, 1.0)
-    images = (2.0 * (images - pmin) / denom - 1.0).astype(np.float32)
+    imgs  = (2.0 * (imgs - pmin) / denom - 1.0).astype(np.float32)
 
-    return images, masks
+    # Binarise masks (threshold at 0.5)
+    masks = (masks > 0.5).astype(np.uint8)
+
+    return imgs, masks
 
 
 # ─────────────────────────────────────────────
@@ -120,50 +106,37 @@ def filter_by_coverage(
     coverages = masks.mean(axis=(1, 2))
     keep = np.where((coverages >= min_cov) & (coverages <= max_cov))[0]
     print(f'  Coverage filter [{min_cov}, {max_cov}]: '
-          f'{len(images)} -> {len(keep)} patches kept')
+          f'{len(images)} -> {len(keep)} patches kept '
+          f'(removed {len(images) - len(keep)})')
     return images[keep], masks[keep], keep
 
 
 # ─────────────────────────────────────────────
-# Sobel channel (optional)
-# ─────────────────────────────────────────────
-
-def apply_sobel_channel(image: np.ndarray) -> np.ndarray:
-    """Compute Sobel gradient magnitude normalised to [0, 1]."""
-    from scipy.ndimage import sobel
-    sx = sobel(image, axis=1)
-    sy = sobel(image, axis=0)
-    mag = np.sqrt(sx**2 + sy**2)
-    if mag.max() > 0:
-        mag = mag / mag.max()
-    return mag.astype(np.float32)
-
-
-# ─────────────────────────────────────────────
-# Full pipeline for one split  (CORRECTED)
+# Full pipeline for one split
 # ─────────────────────────────────────────────
 
 def process_split(
     split: str,
     data_dir: Path,
     out_dir: Path,
-    add_sobel: bool = False,
+    max_samples: int = None,
 ) -> dict:
     """Run the full preprocessing pipeline for one data split.
 
     Steps:
-    1. Load HDF5: images from 'input_images', masks from 'target_masks'
+    1. Load HDF5 (input_images + target_masks)
     2. Downsample to 128x128
-    3. Normalise images to [-1, 1]
-    4. Filter by mask coverage
-    5. Save to out_dir as .npy files
+    3. Normalise images to [-1, 1] per patch
+    4. Binarise masks at threshold 0.5
+    5. Filter by mask coverage
+    6. Save to out_dir as .npy files
 
     Parameters
     ----------
-    split    : 'train', 'dev', or 'test'
-    data_dir : directory with raw Zenodo HDF5 files
-    out_dir  : directory for processed .npy files
-    add_sobel: if True, also save Sobel gradient channel
+    split       : 'train', 'dev', or 'test'
+    data_dir    : directory with raw Zenodo HDF5 files
+    out_dir     : directory for processed .npy files
+    max_samples : limit patches loaded (useful for quick testing)
     """
     print(f'\nProcessing split: {split}')
     print('-' * 40)
@@ -171,36 +144,27 @@ def process_split(
     img_path = data_dir / f'{split}_images.hdf5'
     if not img_path.exists():
         raise FileNotFoundError(
-            f'Missing: {img_path}\nDownload with: zenodo_get 1133969'
+            f'Missing: {img_path}\n'
+            f'Download with: cd data && zenodo_get 1133969'
         )
 
-    # Step 1-3: load, downsample, normalise
-    images, masks = load_hdf5_split(img_path, target_size=PATCH_SIZE)
-
-    # Step 4: filter
+    images, masks = load_hdf5_split(img_path, target_size=PATCH_SIZE,
+                                    max_samples=max_samples)
     images, masks, kept_idx = filter_by_coverage(images, masks)
 
-    # Step 5: optional Sobel
-    if add_sobel:
-        print('  Computing Sobel channel...', end=' ')
-        sobel_ch = np.stack([apply_sobel_channel(images[i]) for i in range(len(images))])
-        np.save(out_dir / f'{split}_sobel.npy', sobel_ch)
-        print(f'done ({sobel_ch.nbytes/1e6:.1f} MB)')
-
-    # Step 6: save
     out_dir.mkdir(parents=True, exist_ok=True)
     np.save(out_dir / f'{split}_images.npy',  images)
     np.save(out_dir / f'{split}_masks.npy',   masks)
     np.save(out_dir / f'{split}_indices.npy', kept_idx)
 
     stats = {
-        'split':   split,
-        'n_kept':  len(images),
+        'split':    split,
+        'n_kept':   len(images),
         'mean_cov': float(masks.mean()),
         'mb':       images.nbytes / 1e6,
     }
 
-    print(f'  Saved {len(images)} patches -> {out_dir}/')
+    print(f'  Saved {len(images)} patches to {out_dir}/')
     print(f'  {split}_images.npy : {images.shape}, {stats["mb"]:.1f} MB')
     print(f'  Mean mask coverage : {stats["mean_cov"]:.4f}')
     return stats
@@ -211,17 +175,32 @@ def process_split(
 # ─────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--data_dir', type=str, default='data')
-    parser.add_argument('--out_dir',  type=str, default='data/processed')
-    parser.add_argument('--sobel', action='store_true')
-    parser.add_argument('--splits', nargs='+', default=['train', 'dev', 'test'])
+    parser = argparse.ArgumentParser(
+        description='DarkNav preprocessing: HDF5 -> filtered .npy arrays'
+    )
+    parser.add_argument('--data_dir',    type=str, default='data')
+    parser.add_argument('--out_dir',     type=str, default='data/processed')
+    parser.add_argument('--splits',      nargs='+', default=['train', 'dev', 'test'])
+    parser.add_argument('--max_samples', type=int,  default=None,
+                        help='Limit patches per split (for quick testing, e.g. 500)')
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
     out_dir  = Path(args.out_dir)
+
+    all_stats = []
     for split in args.splits:
-        process_split(split, data_dir, out_dir, add_sobel=args.sobel)
+        try:
+            stats = process_split(split, data_dir, out_dir,
+                                  max_samples=args.max_samples)
+            all_stats.append(stats)
+        except FileNotFoundError as e:
+            print(f'  Skipping {split}: {e}')
+
+    print('\n=== Preprocessing summary ===')
+    for s in all_stats:
+        print(f"  {s['split']:5s}: {s['n_kept']:5d} patches  "
+              f"{s['mb']:.0f} MB  coverage={s['mean_cov']:.4f}")
 
 
 if __name__ == '__main__':
