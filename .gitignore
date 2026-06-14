@@ -1,13 +1,14 @@
-# Data (download separately, see README)
+# Data (download separately with: zenodo_get 1133969)
 data/*.hdf5
 data/*.h5
-data/*.csv
-data/*.png
-data/*.tif
 data/*.npy
 data/*.npz
+data/*.png
+data/*.zip
+data/processed/
+data/synthetic/
 
-# Model checkpoints over 50MB
+# Checkpoints over 50MB
 runs/condition_B/*.pth
 runs/condition_C/*.pth
 runs/**/*.onnx
@@ -16,15 +17,9 @@ runs/**/*.onnx.data
 # Python
 __pycache__/
 *.pyc
-*.pyo
 .ipynb_checkpoints/
 venv/
-.env
 
 # OS
 .DS_Store
 Thumbs.db
-
-# Scratch files
-src/inspect_hdf5.py
-.ipynb_checkpoints/
